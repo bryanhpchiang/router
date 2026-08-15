@@ -35,15 +35,17 @@ for keychain sessions. The usage curl in that script prefers
 ## Use
 
 ```bash
-router add work        # opens the Claude login; add the other account there
-router use work        # new claude sessions run as "work"
+router add             # straight to the Claude sign-in; named after the email
+router use <name>      # new claude sessions run as that account
 router use main        # back to the keychain login
 router list
 router doctor
 ```
 
-If `router add` cannot capture the token, run `claude setup-token` yourself
-and run `router add work --paste`.
+`router add` names the profile after the account email. Re-add the same
+account to refresh its token. An explicit name still works: `router add work`.
+If the capture fails, run `claude setup-token` yourself and run
+`router add --paste`.
 
 The menu bar app shows the active profile. Click it to switch, or to open
 "Add Account…" in Terminal.

@@ -148,12 +148,26 @@ async function captureSetupToken(): Promise<string | null> {
   return buf.match(TOKEN_RE)?.[0] ?? null;
 }
 
+function deriveName(email: string | undefined, profiles: Profiles): string {
+  let base = (email ?? "")
+    .split("@")[0]!
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^[-_]+|[-_]+$/g, "")
+    .slice(0, 24);
+  if (!base || base === MAIN) base = "account";
+  let name = base;
+  for (let i = 2; profiles[name]; i++) name = `${base}${i}`;
+  return name;
+}
+
 async function cmdAdd(args: string[]) {
   const paste = args.includes("--paste");
   let name = args.find((a) => !a.startsWith("--"));
-  if (!name) name = prompt("Profile name (for example: work):")?.trim() ?? undefined;
-  name = validName(name);
-  if (loadProfiles()[name]) die(`profile "${name}" exists — remove it first`);
+  if (name) {
+    name = validName(name);
+    if (loadProfiles()[name]) die(`profile "${name}" exists — remove it first`);
+  }
 
   let token: string | null = null;
   if (paste) {
@@ -161,20 +175,25 @@ async function cmdAdd(args: string[]) {
     token = raw.match(TOKEN_RE)?.[0] ?? null;
     if (!token) die("that does not look like a sk-ant-oat01-… token");
   } else {
-    console.log("Opening the Claude login flow. Log in as the account you want to add.");
+    console.log("Opening the Claude sign-in. Log in as the account you want to add.");
     console.log("Tip: use a private browser window for an account that is not your browser default.\n");
     token = await captureSetupToken();
     if (!token) {
-      die(
-        "no token captured. Run `claude setup-token` yourself, then run\n" +
-          `  router add ${name} --paste`,
-      );
+      die("no token captured. Run `claude setup-token` yourself, then run\n  router add --paste");
     }
   }
 
   const info = await fetchOauthProfile(token);
-  keychainSet(name, token);
   const profiles = loadProfiles();
+  if (!name) {
+    // No label step: name the profile after the account email. Re-adding
+    // the same account refreshes its token under the existing name.
+    const existing = info.email
+      ? Object.entries(profiles).find(([, p]) => p.email === info.email)?.[0]
+      : undefined;
+    name = existing ?? deriveName(info.email, profiles);
+  }
+  keychainSet(name, token);
   profiles[name] = { ...info, addedAt: new Date().toISOString() };
   saveProfiles(profiles);
   console.log(`\nAdded "${name}" (${info.email ?? "unknown"}, ${info.plan}).`);
@@ -292,7 +311,7 @@ function help() {
   console.log(`router — switch Claude Code accounts
 
 usage:
-  router add [name] [--paste]   add an account (runs claude setup-token)
+  router add [name] [--paste]   add an account (straight to the Claude sign-in)
   router use <name|main>        route new claude sessions to this account
   router list [--json]          show all profiles
   router current [--json]       show the active profile
