@@ -201,20 +201,50 @@ function mainEmail(): string | null {
   }
 }
 
+// --- stored tokens ------------------------------------------------------------
+
+// A profile's keychain entry is JSON {accessToken, refreshToken?, expiresAt?}.
+// Early entries were the bare token string; keep reading those.
+type StoredToken = { accessToken: string; refreshToken?: string; expiresAt?: number };
+
+function readToken(name: string): StoredToken | null {
+  const raw = keychainRead(SERVICE, name);
+  if (!raw) return null;
+  if (raw.startsWith("sk-ant-")) return { accessToken: raw };
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed.accessToken === "string" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeToken(name: string, token: StoredToken) {
+  keychainWrite(SERVICE, name, JSON.stringify(token));
+}
+
 // --- oauth ------------------------------------------------------------------
 
 function b64url(buf: Buffer): string {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function authStart(): string {
+const PENDING_TTL_MS = 10 * 60 * 1000;
+
+// A window reopen must not invalidate the code the user already has, so a
+// fresh pending sign-in is reused unless the caller forces a new one.
+function authStart(force: boolean): { url: string; fresh: boolean } {
+  if (!force) {
+    try {
+      const pending = JSON.parse(readFileSync(PENDING_FILE, "utf8"));
+      if (pending.url && Date.now() - pending.ts < PENDING_TTL_MS) {
+        return { url: pending.url, fresh: false };
+      }
+    } catch {}
+  }
   const verifier = b64url(randomBytes(32));
   const state = b64url(randomBytes(32));
   const challenge = b64url(createHash("sha256").update(verifier).digest());
-  ensureDir();
-  writeFileSync(PENDING_FILE, JSON.stringify({ verifier, state, ts: Date.now() }) + "\n", {
-    mode: 0o600,
-  });
   const q = new URLSearchParams({
     code: "true",
     client_id: CLIENT_ID,
@@ -225,10 +255,15 @@ function authStart(): string {
     code_challenge_method: "S256",
     state,
   });
-  return `${AUTHORIZE_URL}?${q}`;
+  const url = `${AUTHORIZE_URL}?${q}`;
+  ensureDir();
+  writeFileSync(PENDING_FILE, JSON.stringify({ verifier, state, url, ts: Date.now() }) + "\n", {
+    mode: 0o600,
+  });
+  return { url, fresh: true };
 }
 
-type Redeemed = { token: string; email?: string; expiresAt?: number };
+type Redeemed = { token: string; refreshToken?: string; email?: string; expiresAt?: number };
 
 async function authRedeem(paste: string): Promise<Redeemed> {
   let pending: { verifier: string; state: string };
@@ -258,11 +293,41 @@ async function authRedeem(paste: string): Promise<Redeemed> {
   rmSync(PENDING_FILE, { force: true });
   const token = typeof body.access_token === "string" ? body.access_token : null;
   if (!token || !TOKEN_RE.test(token)) throw new Error("no token in the response");
+  const refreshToken =
+    typeof body.refresh_token === "string" && body.refresh_token ? body.refresh_token : undefined;
   const email =
     body.account?.email_address ?? body.account?.email ?? body.email ?? undefined;
   const expiresAt =
     typeof body.expires_in === "number" ? Date.now() + body.expires_in * 1000 : undefined;
-  return { token, email, expiresAt };
+  return { token, refreshToken, email, expiresAt };
+}
+
+async function refreshToken(name: string, stored: StoredToken): Promise<StoredToken | null> {
+  if (!stored.refreshToken) return null;
+  const r = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "refresh_token",
+      refresh_token: stored.refreshToken,
+      client_id: CLIENT_ID,
+    }),
+  });
+  const body: any = await r.json().catch(() => ({}));
+  if (!r.ok || typeof body.access_token !== "string") return null;
+  const next: StoredToken = {
+    accessToken: body.access_token,
+    refreshToken: body.refresh_token ?? stored.refreshToken,
+    expiresAt:
+      typeof body.expires_in === "number" ? Date.now() + body.expires_in * 1000 : undefined,
+  };
+  writeToken(name, next);
+  const profiles = loadProfiles();
+  if (profiles[name]) {
+    profiles[name]!.expiresAt = next.expiresAt;
+    saveProfiles(profiles);
+  }
+  return next;
 }
 
 // --- profile bookkeeping ------------------------------------------------------
@@ -295,7 +360,11 @@ function saveNewProfile(explicit: string | undefined, redeemed: Redeemed): { nam
     addedAt: new Date().toISOString(),
     expiresAt: redeemed.expiresAt ?? Date.now() + YEAR_MS,
   };
-  keychainWrite(SERVICE, name, redeemed.token);
+  writeToken(name, {
+    accessToken: redeemed.token,
+    refreshToken: redeemed.refreshToken,
+    expiresAt: profile.expiresAt,
+  });
   profiles[name] = profile;
   saveProfiles(profiles);
   return { name, profile };
@@ -340,10 +409,10 @@ function switchTo(name: string) {
   const profiles = loadProfiles();
   const profile = profiles[name];
   if (!profile) die(`no profile "${name}" — see: router list`);
-  const token = keychainRead(SERVICE, name);
+  const token = readToken(name);
   if (!token) die(`profile "${name}" has no keychain token — re-add it`);
   if (isMainFamily(item)) stashMain(item!);
-  writeClaudeItem(syntheticItem(item, name, token));
+  writeClaudeItem(syntheticItem(item, name, token.accessToken));
   patchAccountEmail(profile.email);
   setCurrent(name);
 }
@@ -355,20 +424,42 @@ function cmdUse(args: string[]) {
   console.log(`Switched to "${name}". Sessions pick it up on their next request (about 30s).`);
 }
 
-// A running "main" session can refresh its OAuth pair and rewrite the
-// keychain item while a profile is active. Re-stash the fresh credential and
-// re-assert the profile.
-function cmdHeal(args: string[]) {
+// Housekeeping the menu bar app runs periodically:
+// 1. Refresh any stored token that is close to expiry (when the sign-in
+//    handed back a refresh token).
+// 2. A running "main" session can refresh its OAuth pair and rewrite the
+//    keychain item while a profile is active. Re-stash the fresh credential
+//    and re-assert the profile.
+async function cmdHeal(args: string[]) {
+  const quiet = args.includes("--quiet");
+  const say = (msg: string) => {
+    if (!quiet) console.log(msg);
+  };
+
+  const REFRESH_MARGIN_MS = 45 * 60 * 1000;
+  for (const name of Object.keys(loadProfiles())) {
+    const stored = readToken(name);
+    if (!stored?.refreshToken || !stored.expiresAt) continue;
+    if (stored.expiresAt - Date.now() > REFRESH_MARGIN_MS) continue;
+    const next = await refreshToken(name, stored);
+    if (next) say(`refreshed the token for "${name}"`);
+  }
+
   const cur = currentName();
   if (cur === MAIN) return;
-  const item = readClaudeItem();
-  if (!isMainFamily(item)) return;
-  const token = keychainRead(SERVICE, cur);
+  const token = readToken(cur);
   if (!token) return;
-  stashMain(item!);
-  writeClaudeItem(syntheticItem(item, cur, token));
-  patchAccountEmail(loadProfiles()[cur]?.email);
-  if (!args.includes("--quiet")) console.log(`healed: re-asserted "${cur}" after a main refresh`);
+  const item = readClaudeItem();
+  if (isMainFamily(item)) {
+    stashMain(item!);
+    writeClaudeItem(syntheticItem(item, cur, token.accessToken));
+    patchAccountEmail(loadProfiles()[cur]?.email);
+    say(`healed: re-asserted "${cur}" after a main refresh`);
+  } else if (item?.claudeAiOauth?.accessToken !== token.accessToken) {
+    // The stored token moved (a refresh) — keep the live item in step.
+    writeClaudeItem(syntheticItem(item, cur, token.accessToken));
+    say(`healed: updated the live credential for "${cur}"`);
+  }
 }
 
 async function cmdAdd(args: string[]) {
@@ -386,7 +477,7 @@ async function cmdAdd(args: string[]) {
     if (!token) die("that does not look like a sk-ant-oat01-… token");
     redeemed = { token };
   } else {
-    const url = authStart();
+    const { url } = authStart(true);
     console.log("Opening the Claude sign-in in your browser.");
     console.log("Tip: use a private window for an account that is not your browser default.\n");
     console.log(url + "\n");
@@ -408,8 +499,8 @@ async function cmdAdd(args: string[]) {
 async function cmdAuth(args: string[]) {
   const sub = args[0];
   if (sub === "start") {
-    const url = authStart();
-    console.log(JSON.stringify({ url }));
+    const started = authStart(args.includes("--fresh"));
+    console.log(JSON.stringify(started));
     return;
   }
   if (sub === "redeem") {
@@ -428,19 +519,28 @@ async function cmdAuth(args: string[]) {
   die("usage: router auth start|redeem");
 }
 
+// Profiles are identified by the account, so `label` is the email's local
+// part whenever the email is known — including the keychain login.
+function labelFor(email: string | undefined, fallback: string): string {
+  return email ? email.split("@")[0]! : fallback;
+}
+
 async function listData() {
   const current = currentName();
   const profiles = loadProfiles();
+  const main = mainEmail() ?? undefined;
   const rows = [
     {
       name: MAIN,
-      email: mainEmail() ?? undefined,
+      label: labelFor(main, MAIN),
+      email: main,
       plan: undefined as string | undefined,
       source: "keychain",
       current: current === MAIN,
     },
     ...Object.entries(profiles).map(([name, p]) => ({
       name,
+      label: labelFor(p.email, name),
       email: p.email,
       plan: p.plan,
       source: "token",
@@ -459,7 +559,7 @@ async function cmdList(args: string[]) {
   for (const p of data.profiles) {
     const mark = p.current ? "*" : " ";
     const plan = p.plan ? ` (${p.plan})` : "";
-    console.log(`${mark} ${p.name.padEnd(14)} ${p.email ?? "?"}${plan} [${p.source}]`);
+    console.log(`${mark} ${p.label.padEnd(16)} ${p.email ?? "?"}${plan} [${p.source}]`);
   }
 }
 
@@ -467,15 +567,15 @@ async function cmdCurrent(args: string[]) {
   const data = await listData();
   const cur = data.profiles.find((p) => p.current)!;
   if (args.includes("--json")) console.log(JSON.stringify(cur));
-  else console.log(`${cur.name}${cur.email ? ` (${cur.email})` : ""}`);
+  else console.log(`${cur.label}${cur.email ? ` (${cur.email})` : ""}`);
 }
 
 function cmdToken(args: string[]) {
   const name = args[0] ?? currentName();
   if (name === MAIN) die("the main profile uses the keychain login, not a stored token");
-  const token = keychainRead(SERVICE, name);
+  const token = readToken(name);
   if (!token) die(`no keychain token for "${name}"`);
-  console.log(token);
+  console.log(token.accessToken);
 }
 
 function cmdRename(args: string[]) {
@@ -525,16 +625,16 @@ async function cmdDoctor() {
   if (cur === MAIN) {
     report(isMainFamily(item), "keychain holds the real login (has a refresh token)");
   } else {
-    const token = keychainRead(SERVICE, cur);
+    const token = readToken(cur);
     report(!!token, `keychain token for "${cur}"`);
     report(
-      item?.claudeAiOauth?.accessToken === token,
+      item?.claudeAiOauth?.accessToken === token?.accessToken,
       "keychain item matches the active profile (run `router heal` if not)",
     );
     report(!!readStash(), "main login stashed for switch-back");
   }
   for (const name of Object.keys(profiles)) {
-    report(!!keychainRead(SERVICE, name), `token stored for "${name}"`);
+    report(!!readToken(name), `token stored for "${name}"`);
   }
 
   try {
@@ -572,7 +672,7 @@ const [cmd, ...rest] = process.argv.slice(2);
 switch (cmd) {
   case "add": await cmdAdd(rest); break;
   case "use": cmdUse(rest); break;
-  case "heal": cmdHeal(rest); break;
+  case "heal": await cmdHeal(rest); break;
   case "auth": await cmdAuth(rest); break;
   case "list": await cmdList(rest); break;
   case "current": await cmdCurrent(rest); break;

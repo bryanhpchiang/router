@@ -8,7 +8,7 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DEST="$HOME/Applications/Router.app"
 
 APP_NAME=Router BUNDLE_ID="$LABEL" MENU_BAR_APP=1 SIGNING_MODE=adhoc \
-  "$ROOT/Scripts/package_app.sh" release
+  MACOS_MIN_VERSION=15.0 "$ROOT/Scripts/package_app.sh" release
 
 pkill -x Router 2>/dev/null || true
 rm -rf "$DEST"

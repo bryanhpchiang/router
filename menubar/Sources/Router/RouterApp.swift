@@ -8,7 +8,7 @@ struct RouterApp: App {
         MenuBarExtra {
             MenuView(store: store)
         } label: {
-            Label(store.current, systemImage: "person.crop.circle.badge.checkmark")
+            Label(store.currentLabel, systemImage: "person.crop.circle.badge.checkmark")
                 .labelStyle(.titleAndIcon)
                 .task {
                     // The CLI overwrites ~/.router/current in place, so a
@@ -30,5 +30,9 @@ struct RouterApp: App {
             AddAccountView(store: store)
         }
         .windowResizability(.contentSize)
+        .defaultPosition(.center)
+        // The app has no Dock icon, so a buried window is unfindable. Keep
+        // it above the browser during the sign-in.
+        .windowLevel(.floating)
     }
 }

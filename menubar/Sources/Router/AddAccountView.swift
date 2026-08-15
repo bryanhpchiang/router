@@ -33,6 +33,12 @@ struct AddAccountView: View {
             if succeeded {
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.cancelAction)
+            } else {
+                Button("Open the sign-in page again") {
+                    Task { await store.restartSignIn() }
+                }
+                .buttonStyle(.link)
+                .font(.callout)
             }
         }
         .padding(20)

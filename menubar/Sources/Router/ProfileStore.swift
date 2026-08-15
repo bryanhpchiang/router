@@ -16,6 +16,8 @@ struct Profile: Identifiable, Equatable {
 @Observable
 final class ProfileStore {
     private(set) var current = "main"
+    // What the menu bar shows: the account email's local part when known.
+    private(set) var currentLabel = "main"
 
     private let dir = NSHomeDirectory() + "/.router"
     private var currentFile: String { dir + "/current" }
@@ -29,6 +31,21 @@ final class ProfileStore {
     func refresh() {
         let name = readCurrent()
         if name != current { current = name }
+        let label = labelFor(name)
+        if label != currentLabel { currentLabel = label }
+    }
+
+    private func labelFor(_ name: String) -> String {
+        let email = name == "main" ? mainEmail() : profileEmail(name)
+        guard let email, let local = email.split(separator: "@").first else { return name }
+        return String(local)
+    }
+
+    private func profileEmail(_ name: String) -> String? {
+        guard let data = FileManager.default.contents(atPath: profilesFile),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let stored = json["profiles"] as? [String: [String: Any]] else { return nil }
+        return stored[name]?["email"] as? String
     }
 
     func select(_ name: String) async {
@@ -41,12 +58,26 @@ final class ProfileStore {
     }
 
     // Starts a sign-in: the CLI mints the PKCE URL, the browser opens it.
+    // A reopen of the window reuses the pending sign-in, so a code the user
+    // already copied stays valid and the browser does not open again.
     func beginSignIn() async {
-        guard let data = await Self.runCLI(["auth", "start"]),
+        await signIn(fresh: false)
+    }
+
+    func restartSignIn() async {
+        await signIn(fresh: true)
+    }
+
+    private func signIn(fresh: Bool) async {
+        var args = ["auth", "start"]
+        if fresh { args.append("--fresh") }
+        guard let data = await Self.runCLI(args),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = json["url"] as? String,
               let url = URL(string: raw) else { return }
-        NSWorkspace.shared.open(url)
+        if fresh || (json["fresh"] as? Bool ?? true) {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     func redeem(_ code: String) async -> (ok: Bool, message: String) {
