@@ -135,10 +135,18 @@ final class ProfileStore {
         return name.isEmpty ? "main" : name
     }
 
+    // While a profile is active, ~/.claude.json carries that profile's email
+    // (router patches it so Claude Code's own UI shows the right account).
+    // The real login's identity lives in the stash for that window.
     private func mainEmail() -> String? {
-        guard let data = FileManager.default.contents(atPath: claudeConfig),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let account = json["oauthAccount"] as? [String: Any] else { return nil }
-        return account["emailAddress"] as? String
+        for path in [dir + "/stash-account.json", claudeConfig] {
+            guard let data = FileManager.default.contents(atPath: path),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            let account = path == claudeConfig ? json["oauthAccount"] as? [String: Any] : json
+            if let email = account?["emailAddress"] as? String { return email }
+        }
+        return nil
     }
 }
