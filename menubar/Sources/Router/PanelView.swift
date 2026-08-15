@@ -33,7 +33,7 @@ struct PanelView: View {
             .padding(.horizontal, 6)
         }
         .padding(10)
-        .frame(width: 340)
+        .frame(width: 380)
         .task { await store.fetchUsage() }
     }
 }

@@ -64,16 +64,35 @@ final class ProfileStore {
         var next: [String: String] = [:]
         for (name, limits) in json {
             var parts: [String] = []
-            if let five = limits["five"] as? Double { parts.append("5h \(Int(five))%") }
-            if let week = limits["week"] as? Double { parts.append("7d \(Int(week))%") }
-            if let scoped = limits["scoped"] as? [String: Double] {
-                for (model, pct) in scoped.sorted(by: { $0.key < $1.key }) {
-                    parts.append("\(model) \(Int(pct))%")
+            if let five = Self.limitText("5h", limits["five"]) { parts.append(five) }
+            if let week = Self.limitText("7d", limits["week"]) { parts.append(week) }
+            if let scoped = limits["scoped"] as? [String: Any] {
+                for model in scoped.keys.sorted() {
+                    if let text = Self.limitText(model, scoped[model]) { parts.append(text) }
                 }
             }
             if !parts.isEmpty { next[name] = parts.joined(separator: " · ") }
         }
         if next != usage { usage = next }
+    }
+
+    private static func limitText(_ label: String, _ raw: Any?) -> String? {
+        guard let limit = raw as? [String: Any], let pct = limit["pct"] as? Double else { return nil }
+        var text = "\(label) \(Int(pct))%"
+        if let reset = limit["reset"] as? Double { text += " (\(until(reset)))" }
+        return text
+    }
+
+    private static func until(_ epoch: Double) -> String {
+        let secs = max(0, Int(epoch - Date().timeIntervalSince1970))
+        if secs >= 86400 { return "\(secs / 86400)d" }
+        if secs >= 3600 {
+            let h = secs / 3600
+            let m = (secs % 3600) / 60
+            return m > 0 ? "\(h)h\(m)m" : "\(h)h"
+        }
+        if secs >= 60 { return "\(secs / 60)m" }
+        return "<1m"
     }
 
     // Starts a sign-in: the CLI mints the PKCE URL, the browser opens it.

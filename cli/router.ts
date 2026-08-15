@@ -508,23 +508,53 @@ function cmdList(args: string[]) {
 // rate-limits inference-scoped tokens, so whichever fetcher succeeds feeds
 // everyone. Fallbacks per account: that cache (2h), then the session-
 // reported limits the statusline persists (`rate-limits-<name>.json`, 24h).
-type UsageRow = { five?: number; week?: number; scoped?: Record<string, number> };
+type Limit = { pct: number; reset?: number };
+type UsageRow = { five?: Limit; week?: Limit; scoped?: Record<string, Limit> };
+
+function resetEpoch(v: any): number | undefined {
+  if (typeof v === "number") return v;
+  if (typeof v !== "string") return undefined;
+  const t = Date.parse(v);
+  return Number.isFinite(t) ? Math.floor(t / 1000) : undefined;
+}
+
+function asLimit(l: any): Limit | undefined {
+  if (typeof l?.percent !== "number") return undefined;
+  return { pct: l.percent, reset: resetEpoch(l.resets_at) };
+}
 
 function parseLimits(body: any): UsageRow | null {
   const limits = Array.isArray(body?.limits) ? body.limits : null;
   if (!limits) return null;
-  const pick = (kind: string) =>
-    limits.find((l: any) => l.kind === kind)?.percent as number | undefined;
-  const scoped: Record<string, number> = {};
+  const pick = (kind: string) => asLimit(limits.find((l: any) => l.kind === kind));
+  const scoped: Record<string, Limit> = {};
   for (const l of limits) {
-    if (l.kind !== "weekly_scoped" || typeof l.percent !== "number") continue;
-    scoped[l.scope?.model?.display_name ?? l.scope?.surface ?? "scoped"] = l.percent;
+    if (l.kind !== "weekly_scoped") continue;
+    const limit = asLimit(l);
+    if (limit) scoped[l.scope?.model?.display_name ?? l.scope?.surface ?? "scoped"] = limit;
   }
   return {
     five: pick("session"),
     week: pick("weekly_all"),
     scoped: Object.keys(scoped).length ? scoped : undefined,
   };
+}
+
+function humanUntil(epoch: number): string {
+  const secs = Math.max(0, Math.floor(epoch - Date.now() / 1000));
+  if (secs >= 86400) return `${Math.floor(secs / 86400)}d`;
+  if (secs >= 3600) {
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    return m > 0 ? `${h}h${m}m` : `${h}h`;
+  }
+  if (secs >= 60) return `${Math.floor(secs / 60)}m`;
+  return "<1m";
+}
+
+function fmtLimit(label: string, limit: Limit | undefined): string {
+  if (!limit) return `${label} ?`;
+  return `${label} ${limit.pct}%${limit.reset ? ` (${humanUntil(limit.reset)})` : ""}`;
 }
 
 async function cmdUsage(args: string[]) {
@@ -571,8 +601,15 @@ async function cmdUsage(args: string[]) {
         if (Date.now() / 1000 - cached.ts < 24 * 3600) {
           out[name] = {
             ...out[name],
-            five: cached.five ?? undefined,
-            week: out[name]?.week ?? cached.week ?? undefined,
+            five:
+              typeof cached.five === "number"
+                ? { pct: cached.five, reset: cached.fiveReset ?? undefined }
+                : undefined,
+            week:
+              out[name]?.week ??
+              (typeof cached.week === "number"
+                ? { pct: cached.week, reset: cached.weekReset ?? undefined }
+                : undefined),
           };
         }
       } catch {}
@@ -581,10 +618,11 @@ async function cmdUsage(args: string[]) {
   if (args.includes("--json")) console.log(JSON.stringify(out));
   else {
     for (const [name, u] of Object.entries(out)) {
-      const scoped = Object.entries(u.scoped ?? {})
-        .map(([k, v]) => `  ${k} ${v}%`)
-        .join("");
-      console.log(`${name.padEnd(16)} 5h ${u.five ?? "?"}%  7d ${u.week ?? "?"}%${scoped}`);
+      const parts = [fmtLimit("5h", u.five), fmtLimit("7d", u.week)];
+      for (const [model, limit] of Object.entries(u.scoped ?? {})) {
+        parts.push(fmtLimit(model, limit));
+      }
+      console.log(`${name.padEnd(16)} ${parts.join("  ")}`);
     }
   }
 }
