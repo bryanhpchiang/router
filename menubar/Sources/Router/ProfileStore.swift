@@ -10,9 +10,8 @@ struct Profile: Identifiable, Equatable {
     var id: String { name }
 }
 
-// Reads router state straight from disk. The CLI owns writes that need
-// validation (add/remove); a switch is one small file write, so the app
-// does it in place for a snappy menu.
+// Reads router state from disk for display. Switching, healing, and the
+// sign-in flow go through the CLI, which owns the keychain-swap logic.
 @MainActor
 @Observable
 final class ProfileStore {
@@ -32,9 +31,37 @@ final class ProfileStore {
         if name != current { current = name }
     }
 
-    func select(_ name: String) {
-        try? (name + "\n").write(toFile: currentFile, atomically: true, encoding: .utf8)
+    func select(_ name: String) async {
+        _ = await Self.runCLI(["use", name])
         refresh()
+    }
+
+    func heal() async {
+        _ = await Self.runCLI(["heal", "--quiet"])
+    }
+
+    // Starts a sign-in: the CLI mints the PKCE URL, the browser opens it.
+    func beginSignIn() async {
+        guard let data = await Self.runCLI(["auth", "start"]),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let raw = json["url"] as? String,
+              let url = URL(string: raw) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    func redeem(_ code: String) async -> (ok: Bool, message: String) {
+        guard let data = await Self.runCLI(["auth", "redeem", code]),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return (false, "The sign-in failed. Try again.")
+        }
+        if let error = json["error"] as? String {
+            return (false, error)
+        }
+        guard let name = json["name"] as? String else {
+            return (false, "The sign-in failed. Try again.")
+        }
+        let email = json["email"] as? String
+        return (true, "Added \"\(name)\"" + (email.map { " (\($0))" } ?? ""))
     }
 
     // Fresh from disk on every menu open; the files are tiny.
@@ -55,12 +82,20 @@ final class ProfileStore {
         return rows
     }
 
-    func addAccount() {
-        // A .command file in Terminal avoids the AppleScript automation prompt.
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        process.arguments = ["-a", "Terminal", dir + "/add.command"]
-        try? process.run()
+    nonisolated private static func runCLI(_ args: [String]) async -> Data? {
+        await withCheckedContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: NSHomeDirectory() + "/.router/bin/router")
+            process.arguments = args
+            let out = Pipe()
+            process.standardOutput = out
+            process.standardError = Pipe()
+            process.terminationHandler = { _ in
+                // Errors also arrive as JSON on stdout; hand back whatever came.
+                continuation.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
+            }
+            do { try process.run() } catch { continuation.resume(returning: nil) }
+        }
     }
 
     private func readCurrent() -> String {

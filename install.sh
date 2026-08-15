@@ -17,20 +17,20 @@ done
 mkdir -p "$BIN"
 chmod 700 "$DIR"
 
-# claude shim: inject the selected account's token into new sessions.
+# claude shim: a passthrough unless ROUTER_PIN asks to pin this terminal to
+# one profile. Normal switching swaps the keychain credential instead, so it
+# reaches running sessions too.
 cat > "$BIN/claude" <<SHIM
 #!/bin/sh
-# router shim (see ~/Documents/router). Pins new Claude Code sessions to the
-# profile in ~/.router/current. Explicit auth env vars win over the shim.
+# router shim (see ~/Documents/router). ROUTER_PIN=<profile> pins this
+# process to one account. Explicit auth env vars win over the pin.
 REAL="$REAL"
-if [ -z "\$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -z "\$ANTHROPIC_API_KEY" ] && [ -z "\$ANTHROPIC_AUTH_TOKEN" ]; then
-  cur=\$(cat "\$HOME/.router/current" 2>/dev/null)
-  if [ -n "\$cur" ] && [ "\$cur" != "main" ]; then
-    tok=\$(security find-generic-password -s router -a "\$cur" -w 2>/dev/null)
-    if [ -n "\$tok" ]; then
-      export CLAUDE_CODE_OAUTH_TOKEN="\$tok"
-      export ROUTER_PROFILE="\$cur"
-    fi
+if [ -n "\$ROUTER_PIN" ] && [ "\$ROUTER_PIN" != "main" ] \\
+   && [ -z "\$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -z "\$ANTHROPIC_API_KEY" ] && [ -z "\$ANTHROPIC_AUTH_TOKEN" ]; then
+  tok=\$(security find-generic-password -s router -a "\$ROUTER_PIN" -w 2>/dev/null)
+  if [ -n "\$tok" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="\$tok"
+    export ROUTER_PROFILE="\$ROUTER_PIN"
   fi
 fi
 exec "\$REAL" "\$@"
@@ -44,12 +44,7 @@ exec "$BUN" "$REPO/cli/router.ts" "\$@"
 LAUNCHER
 chmod 755 "$BIN/router"
 
-# Terminal one-shot for the menu bar "Add Account" item.
-cat > "$DIR/add.command" <<'CMD'
-#!/bin/zsh
-"$HOME/.router/bin/router" add
-CMD
-chmod 755 "$DIR/add.command"
+rm -f "$DIR/add.command"
 
 # PATH: append at the end of .zshrc so this prepend wins over earlier ones.
 MARK="# router: per-session Claude account (see ~/Documents/router)"

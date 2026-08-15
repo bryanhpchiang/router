@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MenuView: View {
     let store: ProfileStore
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         ForEach(store.profiles()) { profile in
@@ -10,10 +11,11 @@ struct MenuView: View {
             }
         }
         Divider()
-        Text("Running sessions keep their account")
+        Text("Running sessions follow in about 30s")
         Divider()
         Button("Add Account…") {
-            store.addAccount()
+            openWindow(id: "add")
+            NSApplication.shared.activate(ignoringOtherApps: true)
         }
         .keyboardShortcut("n")
         Button("Quit Router") {
@@ -33,7 +35,9 @@ struct MenuView: View {
         Binding {
             store.current == name
         } set: { selected in
-            if selected { store.select(name) }
+            if selected {
+                Task { await store.select(name) }
+            }
         }
     }
 }
