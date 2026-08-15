@@ -1,64 +1,106 @@
 # router
 
-Switch Claude Code between Claude accounts. One CLI, a `claude` shim, a
-statusline segment, and a menu bar app.
+Switch Claude Code between Claude accounts from the macOS menu bar or the
+terminal.
 
-Each added account is a 1-year OAuth token from `claude setup-token`. The
-token lives in the macOS Keychain (service `router`). No re-login is needed
-until the token expires.
+- One click switches every session, running ones included.
+- Accounts are identified by email. Tokens live in the macOS Keychain.
+- Adding an account is one browser sign-in. Switching never asks you to
+  log in again.
+- The menu shows usage limits (5-hour and 7-day) per account.
 
-## How it works
+## Requirements
 
-- `~/.router/current` holds the selected profile name.
-- `~/.router/bin/claude` is a shim that comes first in `PATH`. At launch it
-  reads `current`, pulls that profile's token from the Keychain, and exports
-  `CLAUDE_CODE_OAUTH_TOKEN` and `ROUTER_PROFILE`. Then it execs the real
-  binary.
-- The profile `main` is the normal keychain login. The shim then exports
-  nothing.
-- A switch applies to new sessions only. A running session keeps its
-  account. Run `claude -c` after a switch to continue the same conversation
-  on the new account.
+- macOS 15 or newer, with the Xcode command line tools (`swift`)
+- [Bun](https://bun.sh)
+- Claude Code, logged in with a Claude subscription account
 
 ## Install
 
 ```bash
-./install.sh                        # shim + CLI + PATH entry in ~/.zshrc
-menubar/Scripts/install_app.sh      # Router.app + start at login
+git clone https://github.com/bryanhpchiang/router
+cd router
+./install.sh                      # CLI + PATH entry in ~/.zshrc
+menubar/Scripts/install_app.sh    # menu bar app, starts at login
 ```
 
-The statusline segment is a patch to `~/.claude/statusline.sh` (already
-applied): the pink first segment shows `ROUTER_PROFILE`, or the login email
-for keychain sessions. The usage curl in that script prefers
-`CLAUDE_CODE_OAUTH_TOKEN`, and the usage cache is per profile.
+Agents: follow `AGENTS.md` for a step-by-step setup with verification.
 
 ## Use
 
+Click the menu bar item to switch accounts or to add one. The same from the
+terminal:
+
 ```bash
-router add             # straight to the Claude sign-in; named after the email
-router use <name>      # new claude sessions run as that account
-router use main        # back to the keychain login
-router list
-router doctor
+router add              # browser sign-in; paste the code; done
+router use <name>       # switch every session to this account
+router use main         # back to the normal keychain login
+router list             # all accounts, active one starred
+router usage            # usage limits per account
+router remove <name>    # delete an account's token
+router doctor           # check the installation
 ```
 
-`router add` names the profile after the account email. Re-add the same
-account to refresh its token. An explicit name still works: `router add work`.
-If the capture fails, run `claude setup-token` yourself and run
-`router add --paste`.
+`router add` opens the Claude sign-in page. Sign in as the account you want
+to add. Use a private browser window for an account that is not your
+browser default. The profile takes its name from the account email.
 
-The menu bar app shows the active profile. Click it to switch, or to open
-"Add Account…" in Terminal.
+## How it works
+
+- `router add` runs the same OAuth (PKCE) flow as `claude setup-token` and
+  stores the token in the Keychain (service `router`).
+- A switch swaps the `Claude Code-credentials` keychain item. Running
+  Claude Code sessions re-read it on their next request; they cache the
+  credential in memory for up to ~30 seconds, so a switch reaches them
+  within that window. Conversations survive switches.
+- `main` is your normal login. Its credential is stashed while another
+  account is active, and restored on switch-back.
+- A running `main` session can refresh its OAuth pair and overwrite the
+  swap. The menu bar app runs `router heal` every 10 seconds, which
+  re-stashes the fresh credential and re-asserts your selection.
+
+State lives in `~/.router/` (no tokens on disk; tokens stay in the
+Keychain).
+
+## Statusline (optional)
+
+To show the active account in the Claude Code statusline, resolve it like
+this in your statusline script:
+
+```bash
+acct=$(cat "$HOME/.router/current" 2>/dev/null)
+if [ -z "$acct" ] || [ "$acct" = "main" ]; then
+  acct=$(jq -r '.oauthAccount.emailAddress // ""' "$HOME/.claude.json")
+else
+  acct=$(jq -r --arg n "$acct" '.profiles[$n].email // $n' "$HOME/.router/profiles.json")
+fi
+```
+
+Optional, feeds `router usage` for switched accounts: persist the
+`rate_limits` numbers your statusline receives on stdin:
+
+```bash
+[ -n "$five_pct" ] && printf '{"ts":%s,"five":%s,"week":%s}\n' \
+  "$(date +%s)" "$five_pct" "${week_pct:-null}" \
+  > "$HOME/.claude/cache/rate-limits-${acct_name:-main}.json"
+```
+
+## Uninstall
+
+```bash
+router use main
+launchctl bootout "gui/$(id -u)/dev.bryan.router" 2>/dev/null
+rm -rf ~/Applications/Router.app ~/Library/LaunchAgents/dev.bryan.router.plist ~/.router
+# then delete the "router" and "router-stash" Keychain items and the
+# PATH line in ~/.zshrc
+```
 
 ## Caveats
 
-- `claude setup-token` opens your default browser. The browser's claude.ai
-  session picks the account. Use a private window to add a different
-  account.
-- Only shells that read `~/.zshrc` get the shim. An app that calls the
-  binary by absolute path bypasses the router and runs as `main`.
-- The statusline usage segments for token profiles come from the OAuth
-  usage endpoint with the profile's token. This is verified for normal
-  access tokens, not yet for `setup-token` tokens.
-- Tokens expire after about 1 year. Then: `router remove work` and
-  `router add work`.
+- The sign-in page uses your browser's claude.ai session; the account you
+  are logged into there is the account you add.
+- If a switched account stops authenticating, run `router use main` and
+  re-add it (tokens can expire; `router heal` renews them when the sign-in
+  returned a refresh token).
+- macOS only. Built for personal use; the credential layout it relies on
+  is Claude Code internal and can change.

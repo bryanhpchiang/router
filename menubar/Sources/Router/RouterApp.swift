@@ -20,6 +20,7 @@ struct RouterApp: App {
                     while !Task.isCancelled {
                         store.refresh()
                         if tick % 5 == 0 { await store.heal() }
+                        if tick % 30 == 0 { await store.fetchUsage() }
                         tick += 1
                         try? await Task.sleep(for: .seconds(2))
                     }

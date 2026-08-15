@@ -4,8 +4,6 @@ import Observation
 struct Profile: Identifiable, Equatable {
     let name: String
     let email: String?
-    let plan: String?
-    let isToken: Bool
 
     var id: String { name }
 }
@@ -18,6 +16,8 @@ final class ProfileStore {
     private(set) var current = "main"
     // What the menu bar shows: the account email's local part when known.
     private(set) var currentLabel = "main"
+    // Usage summary per profile name, e.g. "5h 4% · 7d 1%".
+    private(set) var usage: [String: String] = [:]
 
     private let dir = NSHomeDirectory() + "/.router"
     private var currentFile: String { dir + "/current" }
@@ -55,6 +55,20 @@ final class ProfileStore {
 
     func heal() async {
         _ = await Self.runCLI(["heal", "--quiet"])
+    }
+
+    func fetchUsage() async {
+        guard let data = await Self.runCLI(["usage", "--json"]),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]]
+        else { return }
+        var next: [String: String] = [:]
+        for (name, limits) in json {
+            var parts: [String] = []
+            if let five = limits["five"] as? Double { parts.append("5h \(Int(five))%") }
+            if let week = limits["week"] as? Double { parts.append("7d \(Int(week))%") }
+            if !parts.isEmpty { next[name] = parts.joined(separator: " · ") }
+        }
+        if next != usage { usage = next }
     }
 
     // Starts a sign-in: the CLI mints the PKCE URL, the browser opens it.
@@ -97,17 +111,12 @@ final class ProfileStore {
 
     // Fresh from disk on every menu open; the files are tiny.
     func profiles() -> [Profile] {
-        var rows = [Profile(name: "main", email: mainEmail(), plan: nil, isToken: false)]
+        var rows = [Profile(name: "main", email: mainEmail())]
         if let data = FileManager.default.contents(atPath: profilesFile),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let stored = json["profiles"] as? [String: [String: Any]] {
             for name in stored.keys.sorted() {
-                let entry = stored[name] ?? [:]
-                rows.append(Profile(
-                    name: name,
-                    email: entry["email"] as? String,
-                    plan: entry["plan"] as? String,
-                    isToken: true))
+                rows.append(Profile(name: name, email: stored[name]?["email"] as? String))
             }
         }
         return rows

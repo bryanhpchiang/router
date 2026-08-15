@@ -22,9 +22,12 @@ struct MenuView: View {
         .keyboardShortcut("q")
     }
 
-    // Profiles are identified by the account, so the row is the email.
+    // Profiles are identified by the account, so the row is the email,
+    // plus the account's usage when it is known.
     private func title(for profile: Profile) -> String {
-        profile.email ?? profile.name
+        var title = profile.email ?? profile.name
+        if let usage = store.usage[profile.name] { title += "   \(usage)" }
+        return title
     }
 
     private func binding(for name: String) -> Binding<Bool> {
