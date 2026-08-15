@@ -66,6 +66,11 @@ final class ProfileStore {
             var parts: [String] = []
             if let five = limits["five"] as? Double { parts.append("5h \(Int(five))%") }
             if let week = limits["week"] as? Double { parts.append("7d \(Int(week))%") }
+            if let scoped = limits["scoped"] as? [String: Double] {
+                for (model, pct) in scoped.sorted(by: { $0.key < $1.key }) {
+                    parts.append("\(model) \(Int(pct))%")
+                }
+            }
             if !parts.isEmpty { next[name] = parts.joined(separator: " · ") }
         }
         if next != usage { usage = next }

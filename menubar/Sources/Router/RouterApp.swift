@@ -6,7 +6,7 @@ struct RouterApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuView(store: store)
+            PanelView(store: store)
         } label: {
             Label(store.currentLabel, systemImage: "person.crop.circle.badge.checkmark")
                 .labelStyle(.titleAndIcon)
@@ -26,6 +26,7 @@ struct RouterApp: App {
                     }
                 }
         }
+        .menuBarExtraStyle(.window)
 
         Window("Add Account", id: "add") {
             AddAccountView(store: store)

@@ -17,7 +17,7 @@
 // has a refreshToken), re-stashes the fresh main credential, and re-asserts
 // the active profile. The menu bar app calls it periodically.
 
-import { mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -147,7 +147,7 @@ function syntheticItem(base: ClaudeItem | null, name: string, token: StoredToken
   item.claudeAiOauth = {
     accessToken: token.accessToken,
     expiresAt: token.expiresAt ?? Date.now() + YEAR_MS,
-    scopes: ["user:inference"],
+    scopes: ["user:profile", "user:inference"],
     subscriptionType: "max",
   };
   return item;
@@ -241,7 +241,9 @@ function authStart(force: boolean): { url: string; fresh: boolean } {
     client_id: CLIENT_ID,
     response_type: "code",
     redirect_uri: REDIRECT_URI,
-    scope: "user:inference",
+    // user:profile unlocks the usage endpoint (model-scoped limits); an
+    // inference-only token gets 429s there.
+    scope: "user:profile user:inference",
     code_challenge: challenge,
     code_challenge_method: "S256",
     state,
@@ -498,9 +500,33 @@ function cmdList(args: string[]) {
   }
 }
 
-// Usage percentages per account, for the menu bar app. Main's token may be
-// a stale stashed access token while a profile is active; failures for one
-// account just omit that account.
+// Usage per account: 5-hour, 7-day, and model-scoped weekly (e.g. Fable)
+// percentages, for the menu bar app.
+//
+// Successful endpoint responses are written to the same per-account cache
+// the statusline reads (`usage-limits-<name>.json`) — the endpoint often
+// rate-limits inference-scoped tokens, so whichever fetcher succeeds feeds
+// everyone. Fallbacks per account: that cache (2h), then the session-
+// reported limits the statusline persists (`rate-limits-<name>.json`, 24h).
+type UsageRow = { five?: number; week?: number; scoped?: Record<string, number> };
+
+function parseLimits(body: any): UsageRow | null {
+  const limits = Array.isArray(body?.limits) ? body.limits : null;
+  if (!limits) return null;
+  const pick = (kind: string) =>
+    limits.find((l: any) => l.kind === kind)?.percent as number | undefined;
+  const scoped: Record<string, number> = {};
+  for (const l of limits) {
+    if (l.kind !== "weekly_scoped" || typeof l.percent !== "number") continue;
+    scoped[l.scope?.model?.display_name ?? l.scope?.surface ?? "scoped"] = l.percent;
+  }
+  return {
+    five: pick("session"),
+    week: pick("weekly_all"),
+    scoped: Object.keys(scoped).length ? scoped : undefined,
+  };
+}
+
 async function cmdUsage(args: string[]) {
   const item = readClaudeItem();
   const tokens: Record<string, string> = {};
@@ -510,7 +536,9 @@ async function cmdUsage(args: string[]) {
     const stored = readToken(name);
     if (stored) tokens[name] = stored.accessToken;
   }
-  const out: Record<string, { five?: number; week?: number }> = {};
+  const cacheDir = join(HOME, ".claude/cache");
+  mkdirSync(cacheDir, { recursive: true });
+  const out: Record<string, UsageRow> = {};
   await Promise.all(
     Object.entries(tokens).map(async ([name, token]) => {
       try {
@@ -520,30 +548,43 @@ async function cmdUsage(args: string[]) {
         });
         if (!r.ok) return;
         const body: any = await r.json();
-        const pick = (kind: string) =>
-          body.limits?.find((l: any) => l.kind === kind)?.percent as number | undefined;
-        out[name] = { five: pick("session"), week: pick("weekly_all") };
+        const row = parseLimits(body);
+        if (row) {
+          out[name] = row;
+          writeFileSync(join(cacheDir, `usage-limits-${name}.json`), JSON.stringify(body));
+        }
       } catch {}
     }),
   );
-  // The endpoint does not serve inference-scoped tokens. Sessions report
-  // their own limits, and the statusline persists them per account.
-  const names = [MAIN, ...Object.keys(loadProfiles())];
-  for (const name of names) {
-    if (out[name]?.five !== undefined) continue;
-    try {
-      const cached = JSON.parse(
-        readFileSync(join(HOME, `.claude/cache/rate-limits-${name}.json`), "utf8"),
-      );
-      if (Date.now() / 1000 - cached.ts < 24 * 3600) {
-        out[name] = { five: cached.five ?? undefined, week: cached.week ?? undefined };
-      }
-    } catch {}
+  for (const name of [MAIN, ...Object.keys(loadProfiles())]) {
+    if (!out[name]) {
+      try {
+        const path = join(cacheDir, `usage-limits-${name}.json`);
+        if (Date.now() - statSync(path).mtimeMs < 2 * 3600 * 1000) {
+          out[name] = parseLimits(JSON.parse(readFileSync(path, "utf8"))) ?? {};
+        }
+      } catch {}
+    }
+    if (out[name]?.five === undefined) {
+      try {
+        const cached = JSON.parse(readFileSync(join(cacheDir, `rate-limits-${name}.json`), "utf8"));
+        if (Date.now() / 1000 - cached.ts < 24 * 3600) {
+          out[name] = {
+            ...out[name],
+            five: cached.five ?? undefined,
+            week: out[name]?.week ?? cached.week ?? undefined,
+          };
+        }
+      } catch {}
+    }
   }
   if (args.includes("--json")) console.log(JSON.stringify(out));
   else {
     for (const [name, u] of Object.entries(out)) {
-      console.log(`${name.padEnd(16)} 5h ${u.five ?? "?"}%  7d ${u.week ?? "?"}%`);
+      const scoped = Object.entries(u.scoped ?? {})
+        .map(([k, v]) => `  ${k} ${v}%`)
+        .join("");
+      console.log(`${name.padEnd(16)} 5h ${u.five ?? "?"}%  7d ${u.week ?? "?"}%${scoped}`);
     }
   }
 }
