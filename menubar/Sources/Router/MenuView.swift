@@ -11,8 +11,6 @@ struct MenuView: View {
             }
         }
         Divider()
-        Text("Running sessions follow in about 30s")
-        Divider()
         Button("Add Account…") {
             openWindow(id: "add")
             NSApplication.shared.activate(ignoringOtherApps: true)
