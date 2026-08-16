@@ -2,8 +2,10 @@
 // router: switch which Claude account Claude Code uses.
 //
 // Each profile is an OAuth token minted through the same PKCE flow as
-// `claude setup-token`, stored in the macOS Keychain (service "router",
-// account = profile name). Profiles are identified by the account email.
+// Claude Code's /login, with the full /login scope set (Remote Control
+// needs user:sessions:claude_code). Tokens live in the macOS Keychain
+// (service "router", account = profile name). Profiles are identified by
+// the account email.
 //
 // A switch swaps the "Claude Code-credentials" keychain item, so it applies
 // to running sessions too: Claude Code re-reads the item on its next API
@@ -41,9 +43,31 @@ const REDIRECT_URI = "https://platform.claude.com/oauth/code/callback";
 const AUTHORIZE_URL = "https://claude.com/cai/oauth/authorize";
 const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
 const YEAR_MS = 365 * 24 * 3600 * 1000;
 
-type Profile = { email?: string; addedAt: string; expiresAt?: number };
+// The full scope set a real /login grants. Remote Control needs
+// user:sessions:claude_code to reach the claude.ai bridge; an
+// inference-only token drops the bridge with "login expired".
+const SCOPES = [
+  "user:profile",
+  "user:inference",
+  "user:sessions:claude_code",
+  "user:mcp_servers",
+  "user:file_upload",
+];
+// What older router versions minted. heal upgrades these via refresh.
+const LEGACY_SCOPES = ["user:profile", "user:inference"];
+
+type Profile = {
+  email?: string;
+  addedAt: string;
+  expiresAt?: number;
+  // oauthAccount fields for ~/.claude.json (uuids, org) from PROFILE_URL.
+  account?: Record<string, unknown>;
+  accountCheckAt?: number;
+  scopeCheckAt?: number;
+};
 type Profiles = Record<string, Profile>;
 
 function ensureDir() {
@@ -100,8 +124,14 @@ function keychainDelete(service: string, account: string) {
   Bun.spawnSync(["security", "delete-generic-password", "-s", service, "-a", account]);
 }
 
-// A profile's keychain entry is JSON {accessToken, refreshToken?, expiresAt?}.
-type StoredToken = { accessToken: string; refreshToken?: string; expiresAt?: number };
+// A profile's keychain entry is JSON
+// {accessToken, refreshToken?, expiresAt?, scopes?}.
+type StoredToken = {
+  accessToken: string;
+  refreshToken?: string;
+  expiresAt?: number;
+  scopes?: string[];
+};
 
 function readToken(name: string): StoredToken | null {
   const raw = keychainRead(SERVICE, name);
@@ -147,7 +177,7 @@ function syntheticItem(base: ClaudeItem | null, name: string, token: StoredToken
   item.claudeAiOauth = {
     accessToken: token.accessToken,
     expiresAt: token.expiresAt ?? Date.now() + YEAR_MS,
-    scopes: ["user:profile", "user:inference"],
+    scopes: token.scopes ?? LEGACY_SCOPES,
     subscriptionType: "max",
   };
   return item;
@@ -178,16 +208,65 @@ function dropStash() {
   rmSync(ACCOUNT_STASH_FILE, { force: true });
 }
 
-// Display metadata in ~/.claude.json. Auth ignores it; Claude Code's own UI
-// shows it, so keep it pointing at the active account.
-function patchAccountEmail(email: string | undefined) {
-  if (!email) return;
+// Identity metadata in ~/.claude.json. Auth ignores it, but Remote Control
+// reads organizationUuid from it and the UI shows the email, so keep it
+// pointing at the active account. Falls back to an email-only patch until
+// heal has fetched the profile's full account record.
+function patchAccount(profile: Profile | undefined) {
   try {
     const cfg = JSON.parse(readFileSync(CLAUDE_JSON, "utf8"));
     if (!cfg.oauthAccount) return;
-    cfg.oauthAccount.emailAddress = email;
+    if (profile?.account) {
+      cfg.oauthAccount = { ...cfg.oauthAccount, ...profile.account };
+    } else if (profile?.email) {
+      cfg.oauthAccount.emailAddress = profile.email;
+    } else {
+      return;
+    }
     writeFileSync(CLAUDE_JSON, JSON.stringify(cfg, null, 2));
   } catch {}
+}
+
+// The oauth profile endpoint returns the identity behind a token, mapped
+// here to the oauthAccount keys Claude Code keeps in ~/.claude.json.
+async function fetchAccount(accessToken: string): Promise<Record<string, unknown> | null> {
+  try {
+    const r = await fetch(PROFILE_URL, {
+      headers: { Authorization: `Bearer ${accessToken}`, "anthropic-beta": "oauth-2025-04-20" },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!r.ok) return null;
+    const body: any = await r.json();
+    const a = body.account;
+    const o = body.organization;
+    if (!a?.uuid) return null;
+    return {
+      accountUuid: a.uuid,
+      emailAddress: a.email,
+      displayName: a.display_name,
+      accountCreatedAt: a.created_at,
+      organizationUuid: o?.uuid,
+      organizationName: o?.name,
+      organizationType: o?.organization_type,
+      billingType: o?.billing_type,
+      organizationRateLimitTier: o?.rate_limit_tier,
+      hasExtraUsageEnabled: o?.has_extra_usage_enabled,
+      subscriptionCreatedAt: o?.subscription_created_at,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// Fetch and store the account record for a profile. The caller guards the
+// call rate; a failed fetch leaves the profile unchanged.
+async function ensureAccount(name: string, accessToken: string) {
+  const account = await fetchAccount(accessToken);
+  if (!account) return;
+  const profiles = loadProfiles();
+  if (!profiles[name]) return;
+  profiles[name].account = account;
+  saveProfiles(profiles);
 }
 
 function restoreAccountStash() {
@@ -241,9 +320,9 @@ function authStart(force: boolean): { url: string; fresh: boolean } {
     client_id: CLIENT_ID,
     response_type: "code",
     redirect_uri: REDIRECT_URI,
-    // user:profile unlocks the usage endpoint (model-scoped limits); an
-    // inference-only token gets 429s there.
-    scope: "user:profile user:inference",
+    // The full /login scope set. user:sessions:claude_code keeps Remote
+    // Control alive; user:profile unlocks the usage endpoint.
+    scope: SCOPES.join(" "),
     code_challenge: challenge,
     code_challenge_method: "S256",
     state,
@@ -256,7 +335,17 @@ function authStart(force: boolean): { url: string; fresh: boolean } {
   return { url, fresh: true };
 }
 
-type Redeemed = { token: string; refreshToken?: string; email?: string; expiresAt?: number };
+type Redeemed = {
+  token: string;
+  refreshToken?: string;
+  email?: string;
+  expiresAt?: number;
+  scopes?: string[];
+};
+
+function parseScope(scope: unknown): string[] | undefined {
+  return typeof scope === "string" && scope ? scope.split(" ") : undefined;
+}
 
 async function authRedeem(paste: string): Promise<Redeemed> {
   let pending: { verifier: string; state: string };
@@ -291,27 +380,44 @@ async function authRedeem(paste: string): Promise<Redeemed> {
   const email = body.account?.email_address ?? body.account?.email ?? body.email ?? undefined;
   const expiresAt =
     typeof body.expires_in === "number" ? Date.now() + body.expires_in * 1000 : undefined;
-  return { token, refreshToken, email, expiresAt };
+  return { token, refreshToken, email, expiresAt, scopes: parseScope(body.scope) ?? SCOPES };
 }
 
-async function refreshStoredToken(name: string, stored: StoredToken): Promise<StoredToken | null> {
-  if (!stored.refreshToken) return null;
+async function postRefresh(refreshToken: string, scopes: string[]): Promise<any | null> {
   const r = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       grant_type: "refresh_token",
-      refresh_token: stored.refreshToken,
+      refresh_token: refreshToken,
       client_id: CLIENT_ID,
+      scope: scopes.join(" "),
     }),
   });
   const body: any = await r.json().catch(() => ({}));
-  if (!r.ok || typeof body.access_token !== "string") return null;
+  return r.ok && typeof body.access_token === "string" ? body : null;
+}
+
+// A refresh always asks for the full scope set — the token endpoint grants
+// scope expansion on refresh for this client, which upgrades legacy
+// inference-only profiles in place. A rejection falls back to the token's
+// current scopes so the pair stays alive.
+async function refreshStoredToken(name: string, stored: StoredToken): Promise<StoredToken | null> {
+  if (!stored.refreshToken) return null;
+  const want = [...new Set([...SCOPES, ...(stored.scopes ?? [])])];
+  let body = await postRefresh(stored.refreshToken, want);
+  let granted = want;
+  if (!body && stored.scopes) {
+    body = await postRefresh(stored.refreshToken, stored.scopes);
+    granted = stored.scopes;
+  }
+  if (!body) return null;
   const next: StoredToken = {
     accessToken: body.access_token,
     refreshToken: body.refresh_token ?? stored.refreshToken,
     expiresAt:
       typeof body.expires_in === "number" ? Date.now() + body.expires_in * 1000 : undefined,
+    scopes: parseScope(body.scope) ?? granted,
   };
   writeToken(name, next);
   const profiles = loadProfiles();
@@ -326,7 +432,7 @@ async function refreshStoredToken(name: string, stored: StoredToken): Promise<St
 
 // Profiles are identified by the account email. Re-adding the same account
 // refreshes its token under the existing name.
-function saveNewProfile(redeemed: Redeemed): { name: string; email?: string } {
+async function saveNewProfile(redeemed: Redeemed): Promise<{ name: string; email?: string }> {
   const profiles = loadProfiles();
   let name = redeemed.email
     ? Object.entries(profiles).find(([, p]) => p.email === redeemed.email)?.[0]
@@ -344,9 +450,15 @@ function saveNewProfile(redeemed: Redeemed): { name: string; email?: string } {
     for (let i = 2; profiles[name]; i++) name = `${base}${i}`;
   }
   const expiresAt = redeemed.expiresAt ?? Date.now() + YEAR_MS;
-  writeToken(name, { accessToken: redeemed.token, refreshToken: redeemed.refreshToken, expiresAt });
+  writeToken(name, {
+    accessToken: redeemed.token,
+    refreshToken: redeemed.refreshToken,
+    expiresAt,
+    scopes: redeemed.scopes,
+  });
   profiles[name] = { email: redeemed.email, addedAt: new Date().toISOString(), expiresAt };
   saveProfiles(profiles);
+  await ensureAccount(name, redeemed.token);
   return { name, email: redeemed.email };
 }
 
@@ -389,7 +501,7 @@ function switchTo(name: string) {
   if (!token) die(`profile "${name}" has no keychain token — re-add it`);
   if (isMainFamily(item)) stashMain(item!);
   writeClaudeItem(syntheticItem(item, name, token));
-  patchAccountEmail(profile.email);
+  patchAccount(profile);
   setCurrent(name);
 }
 
@@ -401,9 +513,10 @@ function cmdUse(args: string[]) {
 }
 
 // Housekeeping the menu bar app runs periodically:
-// 1. Refresh any stored token that is close to expiry (when the sign-in
-//    handed back a refresh token).
-// 2. Undo a clobber: a running "main" session can refresh its OAuth pair
+// 1. Refresh any stored token that is close to expiry, and upgrade legacy
+//    inference-only tokens to the full scope set (rate-limited retry).
+// 2. Backfill the account record for profiles that predate it.
+// 3. Undo a clobber: a running "main" session can refresh its OAuth pair
 //    and rewrite the keychain item while a profile is active.
 async function cmdHeal(args: string[]) {
   const quiet = args.includes("--quiet");
@@ -412,12 +525,44 @@ async function cmdHeal(args: string[]) {
   };
 
   const REFRESH_MARGIN_MS = 45 * 60 * 1000;
+  const SCOPE_RETRY_MS = 6 * 3600 * 1000;
+  const ACCOUNT_RETRY_MS = 3600 * 1000;
   for (const name of Object.keys(loadProfiles())) {
     const stored = readToken(name);
-    if (!stored?.refreshToken || !stored.expiresAt) continue;
-    if (stored.expiresAt - Date.now() > REFRESH_MARGIN_MS) continue;
+    if (!stored?.refreshToken) continue;
+    const nearExpiry =
+      typeof stored.expiresAt === "number" &&
+      stored.expiresAt - Date.now() <= REFRESH_MARGIN_MS;
+    const have = stored.scopes ?? LEGACY_SCOPES;
+    const missingScopes = SCOPES.some((s) => !have.includes(s));
+    const wantUpgrade =
+      missingScopes && Date.now() - (loadProfiles()[name]?.scopeCheckAt ?? 0) > SCOPE_RETRY_MS;
+    if (!nearExpiry && !wantUpgrade) continue;
+    if (wantUpgrade) {
+      const profiles = loadProfiles();
+      if (profiles[name]) {
+        profiles[name]!.scopeCheckAt = Date.now();
+        saveProfiles(profiles);
+      }
+    }
     const next = await refreshStoredToken(name, stored);
-    if (next) say(`refreshed the token for "${name}"`);
+    if (!next) continue;
+    const upgraded = missingScopes && SCOPES.every((s) => next.scopes?.includes(s));
+    say(upgraded ? `upgraded "${name}" to the full scope set` : `refreshed the token for "${name}"`);
+    if (upgraded) await ensureAccount(name, next.accessToken);
+  }
+
+  for (const [name, profile] of Object.entries(loadProfiles())) {
+    if (profile.account) continue;
+    if (Date.now() - (profile.accountCheckAt ?? 0) < ACCOUNT_RETRY_MS) continue;
+    const stored = readToken(name);
+    if (!stored) continue;
+    const profiles = loadProfiles();
+    if (profiles[name]) {
+      profiles[name]!.accountCheckAt = Date.now();
+      saveProfiles(profiles);
+    }
+    await ensureAccount(name, stored.accessToken);
   }
 
   const cur = currentName();
@@ -428,10 +573,11 @@ async function cmdHeal(args: string[]) {
   if (isMainFamily(item)) {
     stashMain(item!);
     writeClaudeItem(syntheticItem(item, cur, token));
-    patchAccountEmail(loadProfiles()[cur]?.email);
+    patchAccount(loadProfiles()[cur]);
     say(`healed: re-asserted "${cur}" after a main refresh`);
   } else if (item?.claudeAiOauth?.accessToken !== token.accessToken) {
     writeClaudeItem(syntheticItem(item, cur, token));
+    patchAccount(loadProfiles()[cur]);
     say(`healed: updated the live credential for "${cur}"`);
   }
 }
@@ -444,7 +590,7 @@ async function cmdAdd() {
   Bun.spawnSync(["open", url]);
   const code = prompt("Paste the code from the sign-in page:")?.trim() ?? "";
   if (!code) die("no code pasted");
-  const saved = saveNewProfile(await authRedeem(code));
+  const saved = await saveNewProfile(await authRedeem(code));
   console.log(`\nAdded ${saved.email ?? `"${saved.name}"`}.`);
   console.log(`Switch with: router use ${saved.name}`);
 }
@@ -460,7 +606,7 @@ async function cmdAuth(args: string[]) {
     const paste = args[1];
     if (!paste) die("usage: router auth redeem <code>");
     try {
-      const saved = saveNewProfile(await authRedeem(paste));
+      const saved = await saveNewProfile(await authRedeem(paste));
       console.log(JSON.stringify({ name: saved.name, email: saved.email ?? null }));
     } catch (e: any) {
       console.log(JSON.stringify({ error: e.message ?? String(e) }));
@@ -667,7 +813,14 @@ async function cmdDoctor() {
     report(!!readStash(), "main login stashed for switch-back");
   }
   for (const name of Object.keys(profiles)) {
-    report(!!readToken(name), `token stored for "${name}"`);
+    const stored = readToken(name);
+    report(!!stored, `token stored for "${name}"`);
+    if (stored) {
+      report(
+        SCOPES.every((s) => (stored.scopes ?? []).includes(s)),
+        `"${name}" has the full scope set — Remote Control needs it (heal upgrades it)`,
+      );
+    }
   }
 
   const app = Bun.spawnSync(["pgrep", "-x", "Router"]);
