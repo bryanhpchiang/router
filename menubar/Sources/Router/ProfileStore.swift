@@ -116,6 +116,8 @@ final class ProfileStore {
 
     func heal() async {
         _ = await Self.runCLI(["heal", "--quiet"])
+        // heal can rewrite profiles.json, the stash, and ~/.claude.json.
+        refresh()
     }
 
     func fetchUsage() async {
@@ -163,7 +165,11 @@ final class ProfileStore {
     }
 
     func redeem(_ code: String) async -> (ok: Bool, message: String) {
-        guard let data = await Self.runCLI(["auth", "redeem", code]),
+        let data = await Self.runCLI(["auth", "redeem", code])
+        // The CLI can persist the profile before a later step fails, so
+        // re-read state on every outcome, not only on success.
+        defer { refresh() }
+        guard let data,
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return (false, "The sign-in failed. Try again.")
         }
@@ -174,7 +180,6 @@ final class ProfileStore {
             return (false, "The sign-in failed. Try again.")
         }
         let email = json["email"] as? String
-        refresh()
         // The new row renders now; fill in its usage without the wait for
         // the next 60s tick, and without holding up the success message.
         Task { await self.fetchUsage() }
