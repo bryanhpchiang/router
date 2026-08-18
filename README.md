@@ -3,19 +3,25 @@
 Switch Claude Code between Claude accounts from the macOS menu bar or the
 terminal.
 
+Paste this into your agent (Claude Code) to get set up:
+
+```text
+Clone https://github.com/bryanhpchiang/router and follow its AGENTS.md to
+install the router CLI and menu bar app. Verify each step. Stop and ask me
+when a sign-in needs my browser.
+```
+
 - One click switches every session, running ones included.
 - Accounts are identified by email. Tokens live in the macOS Keychain.
 - Adding an account is one browser sign-in. Switching never asks you to
   log in again.
 - The menu shows usage limits (5-hour and 7-day) per account.
 
-## Requirements
+## Manual install
 
-- macOS 15 or newer, with the Xcode command line tools (`swift`)
-- [Bun](https://bun.sh)
-- Claude Code, logged in with a Claude subscription account
-
-## Install
+Requirements: macOS 15+, the Xcode command line tools (`swift`),
+[Bun](https://bun.sh), and Claude Code logged in with a Claude
+subscription account.
 
 ```bash
 git clone https://github.com/bryanhpchiang/router
@@ -23,8 +29,6 @@ cd router
 ./install.sh                      # CLI + PATH entry in ~/.zshrc
 menubar/Scripts/install_app.sh    # menu bar app, starts at login
 ```
-
-Agents: follow `AGENTS.md` for a step-by-step setup with verification.
 
 ## Use
 
