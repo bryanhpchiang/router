@@ -213,7 +213,16 @@ final class ProfileStore {
                 // Errors also arrive as JSON on stdout; hand back whatever came.
                 continuation.resume(returning: out.fileHandleForReading.readDataToEndOfFile())
             }
-            do { try process.run() } catch { continuation.resume(returning: nil) }
+            do { try process.run() } catch {
+                continuation.resume(returning: nil)
+                return
+            }
+            // The poll loop awaits this call, so a wedged CLI (a keychain
+            // prompt, a black-holed connection) must not stall it forever.
+            // Terminate fires the termination handler, which resumes.
+            DispatchQueue.global().asyncAfter(deadline: .now() + 60) {
+                if process.isRunning { process.terminate() }
+            }
         }
     }
 
