@@ -84,8 +84,7 @@ final class ProfileStore {
         if name != current { current = name }
         let label = labelFor(name)
         if label != currentLabel { currentLabel = label }
-        let rows = readProfiles()
-        if rows != profiles { profiles = rows }
+        if let rows = readProfiles(), rows != profiles { profiles = rows }
     }
 
     private func labelFor(_ name: String) -> String {
@@ -170,13 +169,15 @@ final class ProfileStore {
         return (true, "Added \"\(name)\"" + (email.map { " (\($0))" } ?? ""))
     }
 
-    // Fresh from disk on every poll tick; the files are tiny.
-    private func readProfiles() -> [Profile] {
+    // Fresh from disk on every poll tick; the files are tiny. nil means
+    // the file exists but did not parse (the CLI writes it non-atomically,
+    // so a tick can land mid-write) — the caller keeps the previous rows.
+    private func readProfiles() -> [Profile]? {
         var rows = [Profile(name: "main", email: mainEmail())]
-        if let data = FileManager.default.contents(atPath: profilesFile),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let stored = json["profiles"] as? [String: [String: Any]] {
-            for name in stored.keys.sorted() {
+        if let data = FileManager.default.contents(atPath: profilesFile) {
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let stored = json["profiles"] as? [String: [String: Any]] else { return nil }
+            for name in stored.keys.sorted() where name != "main" {
                 rows.append(Profile(name: name, email: stored[name]?["email"] as? String))
             }
         }
