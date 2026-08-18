@@ -10,7 +10,7 @@ struct PanelView: View {
                 AccountRow(
                     profile: profile,
                     isCurrent: store.current == profile.name,
-                    usage: store.usage[profile.name]
+                    usage: store.usage[profile.name]?.summary
                 ) {
                     Task { await store.select(profile.name) }
                 }

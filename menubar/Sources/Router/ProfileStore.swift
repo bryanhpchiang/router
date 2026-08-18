@@ -8,6 +8,49 @@ struct Profile: Identifiable, Equatable {
     var id: String { name }
 }
 
+// One rate limit as the usage endpoint reports it: a percentage of the
+// window consumed, and when that window resets.
+struct UsageLimit: Equatable {
+    let label: String
+    let pct: Int
+    let reset: Double?
+
+    var text: String {
+        guard let reset else { return "\(label) \(pct)%" }
+        return "\(label) \(pct)% (\(Self.until(reset)))"
+    }
+
+    private static func until(_ epoch: Double) -> String {
+        let secs = max(0, Int(epoch - Date().timeIntervalSince1970))
+        if secs >= 86400 { return "\(secs / 86400)d" }
+        if secs >= 3600 {
+            let h = secs / 3600
+            let m = (secs % 3600) / 60
+            return m > 0 ? "\(h)h\(m)m" : "\(h)h"
+        }
+        if secs >= 60 { return "\(secs / 60)m" }
+        return "<1m"
+    }
+}
+
+struct Usage: Equatable {
+    let five: UsageLimit?
+    let week: UsageLimit?
+    let scoped: [UsageLimit]
+
+    var isEmpty: Bool { five == nil && week == nil && scoped.isEmpty }
+
+    // Every limit the endpoint reported, for the account row.
+    var summary: String {
+        ([five, week].compactMap { $0 } + scoped).map(\.text).joined(separator: " · ")
+    }
+
+    // The menu bar has room for one number. The 5-hour window is the one
+    // that stops the next request; the weekly only stands in when the
+    // endpoint withheld the session limit.
+    var headline: UsageLimit? { five ?? week }
+}
+
 // Reads router state from disk for display. Switching, healing, and the
 // sign-in flow go through the CLI, which owns the keychain-swap logic.
 @MainActor
@@ -16,8 +59,14 @@ final class ProfileStore {
     private(set) var current = "main"
     // What the menu bar shows: the account email's local part when known.
     private(set) var currentLabel = "main"
-    // Usage summary per profile name, e.g. "5h 4% · 7d 1%".
-    private(set) var usage: [String: String] = [:]
+    // Limits per profile name, refreshed from `router usage --json`.
+    private(set) var usage: [String: Usage] = [:]
+
+    // The menu bar item: account, and how much of its window is spent.
+    var menuBarTitle: String {
+        guard let headline = usage[current]?.headline else { return currentLabel }
+        return "\(currentLabel) \(headline.pct)%"
+    }
 
     private let dir = NSHomeDirectory() + "/.router"
     private var currentFile: String { dir + "/current" }
@@ -61,38 +110,21 @@ final class ProfileStore {
         guard let data = await Self.runCLI(["usage", "--json"]),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]]
         else { return }
-        var next: [String: String] = [:]
+        var next: [String: Usage] = [:]
         for (name, limits) in json {
-            var parts: [String] = []
-            if let five = Self.limitText("5h", limits["five"]) { parts.append(five) }
-            if let week = Self.limitText("7d", limits["week"]) { parts.append(week) }
-            if let scoped = limits["scoped"] as? [String: Any] {
-                for model in scoped.keys.sorted() {
-                    if let text = Self.limitText(model, scoped[model]) { parts.append(text) }
-                }
-            }
-            if !parts.isEmpty { next[name] = parts.joined(separator: " · ") }
+            let scoped = limits["scoped"] as? [String: Any] ?? [:]
+            let row = Usage(
+                five: Self.limit("5h", limits["five"]),
+                week: Self.limit("7d", limits["week"]),
+                scoped: scoped.keys.sorted().compactMap { Self.limit($0, scoped[$0]) })
+            if !row.isEmpty { next[name] = row }
         }
         if next != usage { usage = next }
     }
 
-    private static func limitText(_ label: String, _ raw: Any?) -> String? {
+    private static func limit(_ label: String, _ raw: Any?) -> UsageLimit? {
         guard let limit = raw as? [String: Any], let pct = limit["pct"] as? Double else { return nil }
-        var text = "\(label) \(Int(pct))%"
-        if let reset = limit["reset"] as? Double { text += " (\(until(reset)))" }
-        return text
-    }
-
-    private static func until(_ epoch: Double) -> String {
-        let secs = max(0, Int(epoch - Date().timeIntervalSince1970))
-        if secs >= 86400 { return "\(secs / 86400)d" }
-        if secs >= 3600 {
-            let h = secs / 3600
-            let m = (secs % 3600) / 60
-            return m > 0 ? "\(h)h\(m)m" : "\(h)h"
-        }
-        if secs >= 60 { return "\(secs / 60)m" }
-        return "<1m"
+        return UsageLimit(label: label, pct: Int(pct), reset: limit["reset"] as? Double)
     }
 
     // Starts a sign-in: the CLI mints the PKCE URL, the browser opens it.
