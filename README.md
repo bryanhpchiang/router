@@ -19,9 +19,11 @@ when a sign-in needs my browser.
 
 ## Manual install
 
-Requirements: macOS 15+, the Xcode command line tools (`swift`),
-[Bun](https://bun.sh), and Claude Code logged in with a Claude
-subscription account.
+Requirements:
+
+- macOS 15 or newer, with the Xcode command line tools (`swift`)
+- [Bun](https://bun.sh)
+- Claude Code, logged in with a Claude subscription account
 
 ```bash
 git clone https://github.com/bryanhpchiang/router
@@ -51,8 +53,9 @@ browser default. The profile takes its name from the account email.
 
 ## How it works
 
-- `router add` runs the same OAuth (PKCE) flow as `claude setup-token` and
-  stores the token in the Keychain (service `router`).
+- `router add` runs the same OAuth (PKCE) flow as Claude Code's `/login`,
+  with the full `/login` scope set (Remote Control needs it), and stores
+  the token in the Keychain (service `router`).
 - A switch swaps the `Claude Code-credentials` keychain item. Running
   Claude Code sessions re-read it on their next request; they cache the
   credential in memory for up to ~30 seconds, so a switch reaches them
