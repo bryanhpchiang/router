@@ -248,18 +248,21 @@ async function fetchAccount(accessToken: string): Promise<Record<string, unknown
     const a = body.account;
     const o = body.organization;
     if (!a?.uuid) return null;
+    // null, not undefined: JSON.stringify drops undefined keys, and a
+    // dropped key would keep the previous account's value through the
+    // merge in patchAccount.
     return {
       accountUuid: a.uuid,
-      emailAddress: a.email,
-      displayName: a.display_name,
-      accountCreatedAt: a.created_at,
-      organizationUuid: o?.uuid,
-      organizationName: o?.name,
-      organizationType: o?.organization_type,
-      billingType: o?.billing_type,
-      organizationRateLimitTier: o?.rate_limit_tier,
-      hasExtraUsageEnabled: o?.has_extra_usage_enabled,
-      subscriptionCreatedAt: o?.subscription_created_at,
+      emailAddress: a.email ?? a.email_address ?? null,
+      displayName: a.display_name ?? null,
+      accountCreatedAt: a.created_at ?? null,
+      organizationUuid: o?.uuid ?? null,
+      organizationName: o?.name ?? null,
+      organizationType: o?.organization_type ?? null,
+      billingType: o?.billing_type ?? null,
+      organizationRateLimitTier: o?.rate_limit_tier ?? null,
+      hasExtraUsageEnabled: o?.has_extra_usage_enabled ?? null,
+      subscriptionCreatedAt: o?.subscription_created_at ?? null,
     };
   } catch {
     return null;
@@ -566,7 +569,10 @@ async function cmdHeal(args: string[]) {
     if (!next) continue;
     const upgraded = missingScopes && SCOPES.every((s) => next.scopes?.includes(s));
     say(upgraded ? `upgraded "${name}" to the full scope set` : `refreshed the token for "${name}"`);
-    if (upgraded) await ensureAccount(name, next.accessToken);
+    if (upgraded) {
+      await ensureAccount(name, next.accessToken);
+      if (name === currentName()) patchAccount(loadProfiles()[name]);
+    }
   }
 
   for (const [name, profile] of Object.entries(loadProfiles())) {
@@ -580,6 +586,11 @@ async function cmdHeal(args: string[]) {
       saveProfiles(profiles);
     }
     await ensureAccount(name, stored.accessToken);
+    // A backfill for the active profile must reach ~/.claude.json now,
+    // not on the next switch.
+    if (name === currentName() && loadProfiles()[name]?.account) {
+      patchAccount(loadProfiles()[name]);
+    }
   }
 
   const cur = currentName();
