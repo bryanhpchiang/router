@@ -185,6 +185,14 @@ function syntheticItem(base: ClaudeItem | null, name: string, token: StoredToken
 
 function stashMain(item: ClaudeItem) {
   keychainWrite(STASH_SERVICE, MAIN, JSON.stringify(item));
+  // The account stash captures main's identity at the moment we leave main.
+  // Later stashes (heal re-asserts a refreshed main credential while a
+  // profile is active) happen when ~/.claude.json already carries the
+  // active profile's identity, so an existing stash must stay untouched.
+  try {
+    statSync(ACCOUNT_STASH_FILE);
+    return;
+  } catch {}
   try {
     const cfg = JSON.parse(readFileSync(CLAUDE_JSON, "utf8"));
     if (cfg.oauthAccount) {
@@ -483,7 +491,10 @@ function switchTo(name: string) {
   if (name === MAIN) {
     if (isMainFamily(item)) {
       // Already holding real login credentials (never left, a session's
-      // refresh reverted the swap, or the user ran /login). Keep them.
+      // refresh reverted the swap, or the user ran /login). Keep them, but
+      // put main's identity record back — a swap-reverting refresh leaves
+      // the active profile's identity in ~/.claude.json.
+      restoreAccountStash();
       dropStash();
     } else {
       const stashed = readStash();
