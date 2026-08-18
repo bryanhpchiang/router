@@ -6,7 +6,7 @@ struct PanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            ForEach(store.profiles()) { profile in
+            ForEach(store.profiles) { profile in
                 AccountRow(
                     profile: profile,
                     isCurrent: store.current == profile.name,

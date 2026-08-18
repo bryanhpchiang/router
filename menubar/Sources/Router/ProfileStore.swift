@@ -18,6 +18,8 @@ final class ProfileStore {
     private(set) var currentLabel = "main"
     // Usage summary per profile name, e.g. "5h 4% · 7d 1%".
     private(set) var usage: [String: String] = [:]
+    // Observed so the menu picks up an account added while it is open.
+    private(set) var profiles: [Profile] = []
 
     private let dir = NSHomeDirectory() + "/.router"
     private var currentFile: String { dir + "/current" }
@@ -33,6 +35,8 @@ final class ProfileStore {
         if name != current { current = name }
         let label = labelFor(name)
         if label != currentLabel { currentLabel = label }
+        let rows = readProfiles()
+        if rows != profiles { profiles = rows }
     }
 
     private func labelFor(_ name: String) -> String {
@@ -130,11 +134,12 @@ final class ProfileStore {
             return (false, "The sign-in failed. Try again.")
         }
         let email = json["email"] as? String
+        refresh()
         return (true, "Added \"\(name)\"" + (email.map { " (\($0))" } ?? ""))
     }
 
-    // Fresh from disk on every menu open; the files are tiny.
-    func profiles() -> [Profile] {
+    // Fresh from disk on every poll tick; the files are tiny.
+    private func readProfiles() -> [Profile] {
         var rows = [Profile(name: "main", email: mainEmail())]
         if let data = FileManager.default.contents(atPath: profilesFile),
            let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
