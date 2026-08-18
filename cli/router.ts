@@ -19,7 +19,7 @@
 // has a refreshToken), re-stashes the fresh main credential, and re-asserts
 // the active profile. The menu bar app calls it periodically.
 
-import { mkdirSync, readFileSync, statSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, writeFileSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createHash, randomBytes } from "node:crypto";
@@ -82,9 +82,18 @@ function loadProfiles(): Profiles {
   }
 }
 
+// A truncate-then-write can destroy the file on a crash or a full disk
+// mid-write, and ~/.claude.json is Claude Code's whole config. Write
+// aside, then rename.
+function writeFileAtomic(path: string, data: string) {
+  const tmp = `${path}.${process.pid}.tmp`;
+  writeFileSync(tmp, data, { mode: 0o600 });
+  renameSync(tmp, path);
+}
+
 function saveProfiles(profiles: Profiles) {
   ensureDir();
-  writeFileSync(PROFILES_FILE, JSON.stringify({ profiles }, null, 2) + "\n", { mode: 0o600 });
+  writeFileAtomic(PROFILES_FILE, JSON.stringify({ profiles }, null, 2) + "\n");
 }
 
 function currentName(): string {
@@ -231,7 +240,7 @@ function patchAccount(profile: Profile | undefined) {
     } else {
       return;
     }
-    writeFileSync(CLAUDE_JSON, JSON.stringify(cfg, null, 2));
+    writeFileAtomic(CLAUDE_JSON, JSON.stringify(cfg, null, 2));
   } catch {}
 }
 
@@ -285,7 +294,7 @@ function restoreAccountStash() {
     const stashed = JSON.parse(readFileSync(ACCOUNT_STASH_FILE, "utf8"));
     const cfg = JSON.parse(readFileSync(CLAUDE_JSON, "utf8"));
     cfg.oauthAccount = stashed;
-    writeFileSync(CLAUDE_JSON, JSON.stringify(cfg, null, 2));
+    writeFileAtomic(CLAUDE_JSON, JSON.stringify(cfg, null, 2));
   } catch {}
 }
 
