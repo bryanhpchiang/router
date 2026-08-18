@@ -8,7 +8,7 @@ struct RouterApp: App {
         MenuBarExtra {
             PanelView(store: store)
         } label: {
-            Label(store.currentLabel, systemImage: "person.crop.circle.badge.checkmark")
+            Label(store.menuBarTitle, systemImage: "person.crop.circle.badge.checkmark")
                 .labelStyle(.titleAndIcon)
                 .task {
                     // The CLI overwrites ~/.router/current in place, so a
