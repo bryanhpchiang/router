@@ -473,7 +473,13 @@ async function saveNewProfile(redeemed: Redeemed): Promise<{ name: string; email
     expiresAt,
     scopes: redeemed.scopes,
   });
-  profiles[name] = { email: redeemed.email, addedAt: new Date().toISOString(), expiresAt };
+  // Spread first: a re-add must keep the account record and check stamps.
+  profiles[name] = {
+    ...profiles[name],
+    email: redeemed.email,
+    addedAt: new Date().toISOString(),
+    expiresAt,
+  };
   saveProfiles(profiles);
   await ensureAccount(name, redeemed.token);
   return { name, email: redeemed.email };
