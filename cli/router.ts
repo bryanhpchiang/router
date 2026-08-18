@@ -384,18 +384,23 @@ async function authRedeem(paste: string): Promise<Redeemed> {
 }
 
 async function postRefresh(refreshToken: string, scopes: string[]): Promise<any | null> {
-  const r = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      grant_type: "refresh_token",
-      refresh_token: refreshToken,
-      client_id: CLIENT_ID,
-      scope: scopes.join(" "),
-    }),
-  });
-  const body: any = await r.json().catch(() => ({}));
-  return r.ok && typeof body.access_token === "string" ? body : null;
+  try {
+    const r = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+        client_id: CLIENT_ID,
+        scope: scopes.join(" "),
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+    const body: any = await r.json().catch(() => ({}));
+    return r.ok && typeof body.access_token === "string" ? body : null;
+  } catch {
+    return null;
+  }
 }
 
 // A refresh always asks for the full scope set — the token endpoint grants
