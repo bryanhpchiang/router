@@ -74,6 +74,9 @@ final class ProfileStore {
     private var currentFile: String { dir + "/current" }
     private var profilesFile: String { dir + "/profiles.json" }
     private var claudeConfig: String { NSHomeDirectory() + "/.claude.json" }
+    // Combined mtime of the row sources at the last successful parse; the
+    // 2s poll skips the JSON work when nothing changed.
+    @ObservationIgnored private var rowsStamp: TimeInterval = -1
 
     init() {
         refresh()
@@ -82,22 +85,28 @@ final class ProfileStore {
     func refresh() {
         let name = readCurrent()
         if name != current { current = name }
+        let stamp = rowSourcesStamp()
+        if stamp != rowsStamp, let rows = readProfiles() {
+            rowsStamp = stamp
+            if rows != profiles { profiles = rows }
+        }
         let label = labelFor(name)
         if label != currentLabel { currentLabel = label }
-        if let rows = readProfiles(), rows != profiles { profiles = rows }
     }
 
+    private func rowSourcesStamp() -> TimeInterval {
+        [profilesFile, claudeConfig, dir + "/stash-account.json"].reduce(0) { acc, path in
+            let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+            let date = attrs?[.modificationDate] as? Date
+            return acc + (date?.timeIntervalSince1970 ?? 0)
+        }
+    }
+
+    // The rows already carry every email; main's comes from readProfiles.
     private func labelFor(_ name: String) -> String {
-        let email = name == "main" ? mainEmail() : profileEmail(name)
-        guard let email, let local = email.split(separator: "@").first else { return name }
+        guard let email = profiles.first(where: { $0.name == name })?.email,
+              let local = email.split(separator: "@").first else { return name }
         return String(local)
-    }
-
-    private func profileEmail(_ name: String) -> String? {
-        guard let data = FileManager.default.contents(atPath: profilesFile),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let stored = json["profiles"] as? [String: [String: Any]] else { return nil }
-        return stored[name]?["email"] as? String
     }
 
     func select(_ name: String) async {
