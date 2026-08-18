@@ -414,15 +414,16 @@ async function postRefresh(refreshToken: string, scopes: string[]): Promise<any 
 // A refresh always asks for the full scope set — the token endpoint grants
 // scope expansion on refresh for this client, which upgrades legacy
 // inference-only profiles in place. A rejection falls back to the token's
-// current scopes so the pair stays alive.
+// current scopes so the pair stays alive. Scopes are recorded only as the
+// endpoint echoes them; an upgrade the response does not confirm is not
+// recorded, so heal retries it later.
 async function refreshStoredToken(name: string, stored: StoredToken): Promise<StoredToken | null> {
   if (!stored.refreshToken) return null;
-  const want = [...new Set([...SCOPES, ...(stored.scopes ?? [])])];
+  const have = stored.scopes ?? LEGACY_SCOPES;
+  const want = [...new Set([...SCOPES, ...have])];
   let body = await postRefresh(stored.refreshToken, want);
-  let granted = want;
-  if (!body && stored.scopes) {
-    body = await postRefresh(stored.refreshToken, stored.scopes);
-    granted = stored.scopes;
+  if (!body && want.length !== have.length) {
+    body = await postRefresh(stored.refreshToken, have);
   }
   if (!body) return null;
   const next: StoredToken = {
@@ -430,7 +431,7 @@ async function refreshStoredToken(name: string, stored: StoredToken): Promise<St
     refreshToken: body.refresh_token ?? stored.refreshToken,
     expiresAt:
       typeof body.expires_in === "number" ? Date.now() + body.expires_in * 1000 : undefined,
-    scopes: parseScope(body.scope) ?? granted,
+    scopes: parseScope(body.scope) ?? stored.scopes,
   };
   writeToken(name, next);
   const profiles = loadProfiles();
