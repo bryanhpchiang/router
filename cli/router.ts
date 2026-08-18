@@ -318,7 +318,13 @@ function authStart(force: boolean): { url: string; fresh: boolean } {
   if (!force) {
     try {
       const pending = JSON.parse(readFileSync(PENDING_FILE, "utf8"));
-      if (pending.url && Date.now() - pending.ts < PENDING_TTL_MS) {
+      if (
+        pending.url &&
+        Date.now() - pending.ts < PENDING_TTL_MS &&
+        // A pending sign-in from an older binary can carry a narrower
+        // scope set; redeeming it would record scopes it never asked for.
+        new URL(pending.url).searchParams.get("scope") === SCOPES.join(" ")
+      ) {
         return { url: pending.url, fresh: false };
       }
     } catch {}
