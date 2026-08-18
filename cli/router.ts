@@ -858,7 +858,9 @@ async function cmdDoctor() {
     if (stored) {
       report(
         SCOPES.every((s) => (stored.scopes ?? []).includes(s)),
-        `"${name}" has the full scope set — Remote Control needs it (heal upgrades it)`,
+        `"${name}" has the full scope set — Remote Control needs it (${
+          stored.refreshToken ? "heal upgrades it" : "re-add it"
+        })`,
       );
     }
   }
