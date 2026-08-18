@@ -96,6 +96,13 @@ function saveProfiles(profiles: Profiles) {
   writeFileAtomic(PROFILES_FILE, JSON.stringify({ profiles }, null, 2) + "\n");
 }
 
+function patchProfile(name: string, patch: Partial<Profile>) {
+  const profiles = loadProfiles();
+  if (!profiles[name]) return;
+  profiles[name] = { ...profiles[name]!, ...patch };
+  saveProfiles(profiles);
+}
+
 function currentName(): string {
   try {
     const name = readFileSync(CURRENT_FILE, "utf8").trim();
@@ -283,10 +290,7 @@ async function fetchAccount(accessToken: string): Promise<Record<string, unknown
 async function ensureAccount(name: string, accessToken: string) {
   const account = await fetchAccount(accessToken);
   if (!account) return;
-  const profiles = loadProfiles();
-  if (!profiles[name]) return;
-  profiles[name].account = account;
-  saveProfiles(profiles);
+  patchProfile(name, { account });
 }
 
 function restoreAccountStash() {
@@ -452,11 +456,7 @@ async function refreshStoredToken(name: string, stored: StoredToken): Promise<St
     scopes: parseScope(body.scope) ?? stored.scopes,
   };
   writeToken(name, next);
-  const profiles = loadProfiles();
-  if (profiles[name]) {
-    profiles[name]!.expiresAt = next.expiresAt;
-    saveProfiles(profiles);
-  }
+  patchProfile(name, { expiresAt: next.expiresAt });
   return next;
 }
 
@@ -568,7 +568,7 @@ async function cmdHeal(args: string[]) {
   const REFRESH_MARGIN_MS = 45 * 60 * 1000;
   const SCOPE_RETRY_MS = 6 * 3600 * 1000;
   const ACCOUNT_RETRY_MS = 3600 * 1000;
-  for (const name of Object.keys(loadProfiles())) {
+  for (const [name, profile] of Object.entries(loadProfiles())) {
     const stored = readToken(name);
     if (!stored?.refreshToken) continue;
     const nearExpiry =
@@ -577,20 +577,15 @@ async function cmdHeal(args: string[]) {
     const have = stored.scopes ?? LEGACY_SCOPES;
     const missingScopes = SCOPES.some((s) => !have.includes(s));
     const wantUpgrade =
-      missingScopes && Date.now() - (loadProfiles()[name]?.scopeCheckAt ?? 0) > SCOPE_RETRY_MS;
+      missingScopes && Date.now() - (profile.scopeCheckAt ?? 0) > SCOPE_RETRY_MS;
     if (!nearExpiry && !wantUpgrade) continue;
-    if (wantUpgrade) {
-      const profiles = loadProfiles();
-      if (profiles[name]) {
-        profiles[name]!.scopeCheckAt = Date.now();
-        saveProfiles(profiles);
-      }
-    }
+    if (wantUpgrade) patchProfile(name, { scopeCheckAt: Date.now() });
     const next = await refreshStoredToken(name, stored);
     if (!next) continue;
     const upgraded = missingScopes && SCOPES.every((s) => next.scopes?.includes(s));
     say(upgraded ? `upgraded "${name}" to the full scope set` : `refreshed the token for "${name}"`);
     if (upgraded) {
+      patchProfile(name, { accountCheckAt: Date.now() });
       await ensureAccount(name, next.accessToken);
       if (name === currentName()) patchAccount(loadProfiles()[name]);
     }
@@ -601,11 +596,7 @@ async function cmdHeal(args: string[]) {
     if (Date.now() - (profile.accountCheckAt ?? 0) < ACCOUNT_RETRY_MS) continue;
     const stored = readToken(name);
     if (!stored) continue;
-    const profiles = loadProfiles();
-    if (profiles[name]) {
-      profiles[name]!.accountCheckAt = Date.now();
-      saveProfiles(profiles);
-    }
+    patchProfile(name, { accountCheckAt: Date.now() });
     await ensureAccount(name, stored.accessToken);
     // A backfill for the active profile must reach ~/.claude.json now,
     // not on the next switch.
