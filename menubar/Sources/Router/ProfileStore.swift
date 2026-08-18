@@ -166,6 +166,9 @@ final class ProfileStore {
         }
         let email = json["email"] as? String
         refresh()
+        // The new row renders now; fill in its usage without the wait for
+        // the next 60s tick, and without holding up the success message.
+        Task { await self.fetchUsage() }
         return (true, "Added \"\(name)\"" + (email.map { " (\($0))" } ?? ""))
     }
 
